@@ -258,13 +258,29 @@ export async function orchestrateNews(limit = 25) {
   }
 
   const result = await runNewsMonitor({ attendees: data });
-  if (result.items.length) {
-    // Batch-insert in chunks of 200 rows to avoid huge payloads.
-    for (let i = 0; i < result.items.length; i += 200) {
-      await sb.from("cw_signals").insert(result.items.slice(i, i + 200));
+  // Coerce published_at — SerpAPI returns "3 days ago" strings that break timestamptz.
+  const toIso = (v: unknown): string | null => {
+    if (!v || typeof v !== "string") return null;
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  };
+  const rows = result.items.map((s) => ({ ...s, published_at: toIso(s.published_at) }));
+  let inserted = 0;
+  if (rows.length) {
+    for (let i = 0; i < rows.length; i += 100) {
+      const chunk = rows.slice(i, i + 100);
+      const { error, data: inData } = await sb
+        .from("cw_signals")
+        .insert(chunk)
+        .select("id");
+      if (error) {
+        result.errors.push({ source: "cw_signals.insert", message: error.message });
+      } else {
+        inserted += inData?.length ?? 0;
+      }
     }
   }
-  const stats = { signals: result.items.length };
+  const stats = { gathered: result.items.length, inserted };
   await logRun("orchestrator:news", started, stats, result.ok, result.errors);
   return { stats, errors: result.errors };
 }
