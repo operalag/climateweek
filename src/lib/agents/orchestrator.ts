@@ -61,10 +61,32 @@ export async function orchestrateDiscovery(opts: { skipSearch?: boolean } = {}) 
     });
   }
 
+  // Dedupe the in-memory batch before upsert — multiple seed pages can
+  // surface the same entity (e.g. UBS as a sponsor AND as a speaker's org).
+  // Postgres rejects "ON CONFLICT DO UPDATE" hitting the same row twice.
+  const deduped = new Map<string, (typeof attendees)[number]>();
+  for (const a of attendees) {
+    const key = `${a.kind}|${a.normalized_name}`;
+    const prev = deduped.get(key);
+    if (!prev) {
+      deduped.set(key, a);
+      continue;
+    }
+    // merge: prefer non-null / richer values
+    deduped.set(key, {
+      ...prev,
+      ...a,
+      partnership_tier: prev.partnership_tier ?? a.partnership_tier ?? null,
+      role: prev.role ?? a.role ?? null,
+      tags: Array.from(new Set([...(prev.tags ?? []), ...(a.tags ?? [])])),
+    });
+  }
+  const attendeesUnique = [...deduped.values()];
+
   // Upsert attendees
   const { error: aErr, data: aData } = await sb
     .from("cw_attendees")
-    .upsert(attendees, { onConflict: "kind,normalized_name", ignoreDuplicates: false })
+    .upsert(attendeesUnique, { onConflict: "kind,normalized_name", ignoreDuplicates: false })
     .select("id,name,normalized_name");
 
   // PostgreSQL `date` is strict — coerce unparseable values to null.
