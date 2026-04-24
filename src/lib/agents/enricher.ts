@@ -9,7 +9,7 @@
  *  4. Apollo (optional) adds the top 5 contacts matching target roles.
  */
 import { z } from "zod";
-import { perplexityAsk } from "@/lib/providers/perplexity";
+import { geminiGrounded } from "@/lib/providers/gemini";
 import { claudeStructured } from "@/lib/providers/anthropic";
 import { firecrawlScrape } from "@/lib/providers/firecrawl";
 import { apolloOrgEnrich, apolloPeopleSearch } from "@/lib/providers/apollo";
@@ -38,21 +38,27 @@ const OrgSchema = z.object({
   short_description: z.string().nullable().default(null),
 });
 
-async function enrichOrgViaPerplexity(name: string): Promise<Partial<EnrichedOrg>> {
-  const prompt = `Research the organization "${name}" and return the following fields:\n- website (root URL)\n- linkedin_url (full https://linkedin.com/company/... URL)\n- hq_city\n- hq_country\n- sector (one of: climate-tech, sustainable-finance, carbon-markets, renewable-energy, circular-economy, nature-tech, ESG-data, impact-investing, consulting, academia, government, NGO, other)\n- short_description (1-2 sentences, what they do, in English)\n\nReturn ONLY a JSON object with exactly those keys; use null for unknown.`;
-  const ans = await perplexityAsk(prompt, {
-    system: "You are a fast B2B research assistant. Return only JSON.",
-    model: "sonar",
-  });
+async function enrichOrgViaGemini(name: string): Promise<Partial<EnrichedOrg>> {
+  const prompt = `Research the organization "${name}" using Google Search. Return ONLY a JSON object with these exact keys (use null for unknown):
+{
+  "website": "root URL like https://example.com",
+  "linkedin_url": "https://linkedin.com/company/...",
+  "hq_city": "city name",
+  "hq_country": "country name",
+  "sector": "one of: climate-tech, sustainable-finance, carbon-markets, renewable-energy, circular-economy, nature-tech, ESG-data, impact-investing, consulting, academia, government, NGO, other",
+  "short_description": "1-2 sentences, English"
+}
+Return JSON only. No prose. No markdown fences.`;
+  const { text, citations } = await geminiGrounded(prompt);
   try {
     const parsed = await claudeStructured({
       schema: OrgSchema,
       system: "Reformat this into strict JSON matching the schema. Use null where unknown.",
-      user: ans.content,
+      user: text,
     });
-    return { ...parsed, sources: ans.citations };
+    return { ...parsed, sources: citations };
   } catch {
-    return { sources: ans.citations };
+    return { sources: citations };
   }
 }
 
@@ -95,8 +101,8 @@ export async function enrichOrganization(name: string): Promise<EnrichedOrg> {
     sources: [],
   };
 
-  const pxp = await enrichOrgViaPerplexity(name).catch(() => ({} as Partial<EnrichedOrg>));
-  Object.assign(base, pxp);
+  const gem = await enrichOrgViaGemini(name).catch(() => ({} as Partial<EnrichedOrg>));
+  Object.assign(base, gem);
 
   const domain = deriveDomain(base.website);
   if (domain) base.domain = domain;
