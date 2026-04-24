@@ -10,10 +10,10 @@ import type { AgentResult } from "@/lib/types";
 const VERSION = "v1.0";
 
 const ScoreSchema = z.object({
-  reachout_fit: z.number().int().min(0).max(100),
-  influence: z.number().int().min(0).max(100),
-  signal_strength: z.number().int().min(0).max(100),
-  rationale: z.string(),
+  reachout_fit: z.number().min(0).max(100).default(50),
+  influence: z.number().min(0).max(100).default(50),
+  signal_strength: z.number().min(0).max(100).default(30),
+  rationale: z.string().default(""),
 });
 
 export interface ScoreInput {
@@ -51,13 +51,13 @@ export async function scoreAttendee(input: ScoreInput): Promise<ScoreResult> {
 
   const parsed = await claudeStructured({
     schema: ScoreSchema,
-    system:
-      "You score Climate Week Zurich attendees on three axes, 0-100. " +
-      "reachout_fit = how well they match the ICP. " +
-      "influence = how senior / how weighty their org is (anchor near the provided prior). " +
-      "signal_strength = how actionable the recent signals are. " +
-      "Be concise and concrete in rationale (2-3 sentences).",
+    system: `You score Climate Week Zurich attendees on three axes (0-100 integers).
+- reachout_fit: alignment with the ICP
+- influence: seniority of role or weight of org (anchor near prior_influence)
+- signal_strength: how actionable recent signals are (default 30 when no signals given)
+Return STRICT JSON with exactly these keys: {"reachout_fit": <int>, "influence": <int>, "signal_strength": <int>, "rationale": "<2-3 sentences>"}. No prose, no wrappers, no extra keys.`,
     user: JSON.stringify({ input, icp, prior_influence: prior }, null, 2),
+    maxTokens: 400,
   });
 
   const composite = Math.round(
@@ -66,7 +66,14 @@ export async function scoreAttendee(input: ScoreInput): Promise<ScoreResult> {
       parsed.signal_strength * 0.2,
   );
 
-  return { version: VERSION, ...parsed, composite };
+  return {
+    version: VERSION,
+    reachout_fit: Math.round(parsed.reachout_fit),
+    influence: Math.round(parsed.influence),
+    signal_strength: Math.round(parsed.signal_strength),
+    rationale: parsed.rationale,
+    composite,
+  };
 }
 
 export async function runScorer(args: {
