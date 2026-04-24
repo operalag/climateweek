@@ -1,0 +1,13 @@
+services:
+  climateweek:
+    build: .
+    image: climateweek:latest
+    container_name: climateweek
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3020:3000"
+    env_file:
+      - .env.production
+    environment:
+      - NODE_ENV=production
+      - NEXT_TELEMETRY_DISABLED=1
