@@ -259,7 +259,10 @@ export async function orchestrateNews(limit = 25) {
 
   const result = await runNewsMonitor({ attendees: data });
   if (result.items.length) {
-    await sb.from("cw_signals").insert(result.items);
+    // Batch-insert in chunks of 200 rows to avoid huge payloads.
+    for (let i = 0; i < result.items.length; i += 200) {
+      await sb.from("cw_signals").insert(result.items.slice(i, i + 200));
+    }
   }
   const stats = { signals: result.items.length };
   await logRun("orchestrator:news", started, stats, result.ok, result.errors);

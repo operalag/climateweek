@@ -113,19 +113,41 @@ export async function runNewsMonitor(args: {
   for (const a of slice) {
     try {
       const raw = await fanOut(a.name, fromDate);
+      // Dedupe hits by URL (providers often echo the same article)
+      const byUrl = new Map<string, (typeof raw)[number]>();
       for (const r of raw) {
-        const trigger_score = await scoreTrigger(a.name, r);
-        items.push({
-          attendee_id: a.id,
-          kind: "news",
-          title: r.title,
-          url: r.url,
-          source: r.source,
-          excerpt: r.excerpt,
-          published_at: r.published_at,
-          trigger_score,
-        });
+        if (!r.url || !r.title) continue;
+        if (!byUrl.has(r.url)) byUrl.set(r.url, r);
       }
+      const unique = [...byUrl.values()];
+
+      // Parallel trigger-scoring; cap concurrency to avoid thrashing Anthropic.
+      const scored: Partial<Signal>[] = [];
+      const CONCURRENCY = 6;
+      for (let i = 0; i < unique.length; i += CONCURRENCY) {
+        const batch = unique.slice(i, i + CONCURRENCY);
+        const results = await Promise.allSettled(
+          batch.map(async (r) => ({
+            trigger_score: await scoreTrigger(a.name, r),
+            hit: r,
+          })),
+        );
+        for (const res of results) {
+          if (res.status !== "fulfilled") continue;
+          const { hit, trigger_score } = res.value;
+          scored.push({
+            attendee_id: a.id,
+            kind: "news",
+            title: hit.title,
+            url: hit.url,
+            source: hit.source,
+            excerpt: hit.excerpt,
+            published_at: hit.published_at,
+            trigger_score,
+          });
+        }
+      }
+      items.push(...scored);
     } catch (err) {
       errors.push({ source: a.name, message: (err as Error).message });
     }
