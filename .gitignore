@@ -53,5 +53,4 @@ supabase/.temp/
 supabase/.branches/
 
 # MCP / misc
-.claude/*.json
-!.claude/settings.example.json
+.claude/
