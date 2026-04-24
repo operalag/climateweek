@@ -67,11 +67,18 @@ export async function orchestrateDiscovery(opts: { skipSearch?: boolean } = {}) 
     .upsert(attendees, { onConflict: "kind,normalized_name", ignoreDuplicates: false })
     .select("id,name,normalized_name");
 
+  // PostgreSQL `date` is strict — coerce unparseable values to null.
+  const coerceDate = (d?: string | null): string | null => {
+    if (!d) return null;
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(d);
+    return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+  };
+
   const { error: eErr } = await sb.from("cw_events").upsert(
     events.map((e) => ({
       title: e.title,
       slug: e.title.toLowerCase().replace(/[^a-z0-9]+/g, "-").slice(0, 80),
-      date: e.date ?? null,
+      date: coerceDate(e.date),
       location: e.location ?? null,
       track: e.track ?? null,
       url: e.source_url,

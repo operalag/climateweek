@@ -84,27 +84,35 @@ export type CrawlerItem =
     };
 
 async function fetchPage(url: string): Promise<string> {
-  // Try a raw fetch first (cheaper); fall back to Firecrawl on 5xx / empty body.
+  // Climate Week Zurich is a Webflow site — JS-rendered. Firecrawl is the
+  // right default. Fall back to raw fetch only if Firecrawl is unavailable.
+  try {
+    const fc = await firecrawlScrape(url, { formats: ["markdown"], onlyMainContent: true });
+    if (fc.markdown && fc.markdown.length > 200) return fc.markdown;
+  } catch {
+    // fall through
+  }
   try {
     const r = await fetch(url, {
       headers: { "user-agent": "Mozilla/5.0 (climateweek-agent/0.1)" },
     });
-    if (r.ok) {
-      const txt = await r.text();
-      if (txt.length > 500) return txt;
-    }
+    if (r.ok) return await r.text();
   } catch {
-    // fall through
+    // give up
   }
-  const fc = await firecrawlScrape(url, { formats: ["markdown"] });
-  return fc.markdown ?? "";
+  return "";
 }
 
 async function extractPartners(pageText: string, url: string): Promise<CrawlerItem[]> {
   const parsed = await claudeStructured({
     schema: PartnerListSchema,
-    system:
-      "You extract sponsor and partner organizations from Climate Week Zurich website HTML/markdown. Return every organization mentioned with its partnership tier (platinum, gold, silver, bronze, contributor, community, academic, media, or null if unknown). Be exhaustive.",
+    arrayKey: "organizations",
+    system: `You extract sponsor and partner organizations from Climate Week Zurich website markdown. Return every organization mentioned with its partnership tier.
+
+Valid tiers: "platinum" | "gold" | "silver" | "bronze" | "contributor" | "community" | "academic" | "media" | null.
+If the content is obviously NOT a partners/sponsors page, return {"organizations":[]} — never prose.
+
+Return shape: {"organizations":[{"name":"UBS","tier":"platinum"}, ...]}`,
     user: `Extract organizations from this page:\n\n${pageText.slice(0, 80000)}`,
     maxTokens: 4000,
   });
@@ -120,8 +128,10 @@ async function extractPartners(pageText: string, url: string): Promise<CrawlerIt
 async function extractSpeakers(pageText: string, url: string): Promise<CrawlerItem[]> {
   const parsed = await claudeStructured({
     schema: SpeakerListSchema,
-    system:
-      "You extract featured speakers from Climate Week Zurich website HTML/markdown. For each speaker, return name, role/title, organization, and the linked event if mentioned. Be exhaustive.",
+    arrayKey: "speakers",
+    system: `You extract featured speakers from Climate Week Zurich website markdown. For each speaker, return name, role/title, organization, and the linked event if mentioned. If the page has no speakers, return {"speakers":[]}. Never prose.
+
+Return shape: {"speakers":[{"name":"Johan Rockstrom","role":"Director","organization":"Potsdam Institute","event":"Opening Ceremony"}, ...]}`,
     user: `Extract speakers from this page:\n\n${pageText.slice(0, 80000)}`,
     maxTokens: 4000,
   });
@@ -139,8 +149,15 @@ async function extractSpeakers(pageText: string, url: string): Promise<CrawlerIt
 async function extractEvents(pageText: string, url: string): Promise<CrawlerItem[]> {
   const parsed = await claudeStructured({
     schema: EventListSchema,
-    system:
-      "You extract events from Climate Week Zurich website markdown. For each event, return title, host organization, date, location, and track/theme if available. Be exhaustive.",
+    arrayKey: "events",
+    system: `You extract events from Climate Week Zurich website markdown. For each event, return:
+- title (string)
+- host (string|null) — organization hosting it
+- date (string|null) — ISO YYYY-MM-DD if known, else null. If a date range appears, return the START date only in YYYY-MM-DD form. Never return ranges or natural-language.
+- location (string|null)
+- track (string|null)
+
+If no events on the page, return {"events":[]}. Never prose.`,
     user: `Extract events from this page:\n\n${pageText.slice(0, 100000)}`,
     maxTokens: 6000,
   });

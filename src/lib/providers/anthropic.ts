@@ -14,25 +14,59 @@ export async function claudeStructured<T>(args: {
   user: string;
   model?: string;
   maxTokens?: number;
+  /** If provided, a top-level JSON array from the model is wrapped as { [arrayKey]: [...] }. */
+  arrayKey?: string;
 }): Promise<T> {
   const model = args.model ?? "claude-sonnet-4-6";
-  const res = await client().messages.create({
-    model,
-    max_tokens: args.maxTokens ?? 2000,
-    system:
-      args.system +
-      "\n\nYou MUST respond with valid JSON only. No prose, no markdown, no fencing.",
-    messages: [{ role: "user", content: args.user }],
-  });
-  const text = res.content
-    .filter((b): b is Anthropic.TextBlock => b.type === "text")
-    .map((b) => b.text)
-    .join("");
+  const strictSystem =
+    args.system +
+    "\n\nCRITICAL: Respond with VALID JSON ONLY. Never prose. Never 'I need more context'. If unsure, return an empty array for list fields. No markdown, no fencing, no comments.";
 
-  // strip fences if the model adds them anyway
-  const cleaned = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
-  const parsed = JSON.parse(cleaned);
-  return args.schema.parse(parsed);
+  const ask = async (attempt: number) => {
+    const res = await client().messages.create({
+      model,
+      max_tokens: args.maxTokens ?? 2000,
+      system: attempt === 0 ? strictSystem : strictSystem + "\nPrevious reply was not valid JSON. Return the JSON object now.",
+      messages: [{ role: "user", content: args.user }],
+    });
+    return res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === "text")
+      .map((b) => b.text)
+      .join("");
+  };
+
+  const extractJson = (text: string): unknown => {
+    const cleaned = text.replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+    try {
+      return JSON.parse(cleaned);
+    } catch {
+      // find first { ... } or [ ... ] block
+      const objMatch = cleaned.match(/[{[][\s\S]*[}\]]/);
+      if (objMatch) {
+        try {
+          return JSON.parse(objMatch[0]);
+        } catch {
+          /* fall through */
+        }
+      }
+      throw new Error("not json");
+    }
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const text = await ask(attempt);
+      let parsed = extractJson(text);
+      if (args.arrayKey && Array.isArray(parsed)) {
+        parsed = { [args.arrayKey]: parsed };
+      }
+      return args.schema.parse(parsed);
+    } catch (err) {
+      if (attempt === 1) throw err;
+      // else retry
+    }
+  }
+  throw new Error("claudeStructured: unreachable");
 }
 
 /** Simple text prompt. */
