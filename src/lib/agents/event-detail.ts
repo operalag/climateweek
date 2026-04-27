@@ -27,13 +27,28 @@ const DetailSchema = z.object({
   host_org: z.string().nullable().default(null),
   speakers: z
     .array(
-      z.object({
-        name: z.string(),
-        role: z.string().nullable().default(null),
-        organization: z.string().nullable().default(null),
-      }),
+      z
+        .object({
+          name: z.union([z.string(), z.null()]).optional(),
+          role: z.union([z.string(), z.null()]).optional(),
+          organization: z.union([z.string(), z.null()]).optional(),
+        })
+        .transform((s) => ({
+          name: typeof s.name === "string" ? s.name.trim() : "",
+          role: typeof s.role === "string" ? s.role : null,
+          organization: typeof s.organization === "string" ? s.organization : null,
+        }))
+        .pipe(
+          z.object({
+            name: z.string(),
+            role: z.string().nullable(),
+            organization: z.string().nullable(),
+          }),
+        ),
     )
-    .default([]),
+    .default([])
+    // drop empty-name entries silently
+    .transform((arr) => arr.filter((s) => s.name.length > 0)),
 });
 
 export type EventDetail = z.infer<typeof DetailSchema>;
