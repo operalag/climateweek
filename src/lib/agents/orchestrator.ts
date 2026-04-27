@@ -9,6 +9,8 @@ import { runSearch } from "./search";
 import { runEnricher } from "./enricher";
 import { runScorer } from "./scorer";
 import { runNewsMonitor } from "./news-monitor";
+import { runEventHarvester } from "./event-harvester";
+import { runEventDetail } from "./event-detail";
 import { normalizeName } from "@/lib/normalize";
 import type { CrawlerItem } from "./crawler";
 
@@ -285,11 +287,175 @@ export async function orchestrateNews(limit = 25) {
   return { stats, errors: result.errors };
 }
 
-/** Full pipeline: discovery → enrich → news → score. */
-export async function orchestrateFull(opts: { enrichLimit?: number; newsLimit?: number; scoreLimit?: number } = {}) {
+/** Harvest event URLs (Glueup + climateweek site) and persist into cw_events as stubs. */
+export async function orchestrateEventHarvest() {
+  const started = new Date().toISOString();
+  const sb = getServiceSupabase();
+  const result = await runEventHarvester();
+  const rows = result.items.map((e) => ({
+    title: e.slug.replace(/-\d+$/, "").replace(/-/g, " "),
+    slug: e.slug,
+    url: e.url,
+    source: e.source,
+  }));
+  let inserted = 0;
+  if (rows.length) {
+    const { data, error } = await sb
+      .from("cw_events")
+      .upsert(rows, { onConflict: "slug", ignoreDuplicates: false })
+      .select("id");
+    if (error) result.errors.push({ source: "cw_events.upsert", message: error.message });
+    else inserted = data?.length ?? 0;
+  }
+  const stats = { discovered: result.items.length, upserted: inserted };
+  await logRun("orchestrator:event-harvest", started, stats, result.ok, result.errors);
+  return { stats, errors: result.errors };
+}
+
+/** For the next N events without a description, scrape detail and link speakers. */
+export async function orchestrateEventDetails(limit = 10) {
+  const started = new Date().toISOString();
+  const sb = getServiceSupabase();
+
+  const { data: pending } = await sb
+    .from("cw_events")
+    .select("id,url,slug,description")
+    .or("description.is.null,description.eq.")
+    .not("url", "is", null)
+    .limit(limit);
+
+  if (!pending?.length) {
+    await logRun("orchestrator:event-details", started, { pending: 0 });
+    return { stats: { pending: 0, scraped: 0, speakers: 0 }, errors: [] };
+  }
+
+  const urls = pending.map((p) => p.url as string);
+  const result = await runEventDetail({ urls, concurrency: 3 });
+
+  let speakersLinked = 0;
+  for (const d of result.items) {
+    const ev = pending.find((p) => p.url === d.url);
+    if (!ev) continue;
+
+    const coerceDate = (s?: string | null): string | null => {
+      if (!s) return null;
+      const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(s);
+      return m ? `${m[1]}-${m[2]}-${m[3]}` : null;
+    };
+
+    // Update the event row
+    await sb
+      .from("cw_events")
+      .update({
+        title: d.title,
+        date: coerceDate(d.date),
+        start_time: d.start_time,
+        end_time: d.end_time,
+        location: d.location,
+        description: d.description,
+        theme: d.theme,
+        track: d.theme,
+      })
+      .eq("id", ev.id);
+
+    // Upsert host org as attendee, link to event
+    if (d.host_org) {
+      const { data: hostRow } = await sb
+        .from("cw_attendees")
+        .upsert(
+          {
+            kind: "organization",
+            name: d.host_org,
+            normalized_name: normalizeName(d.host_org),
+            source: "event-detail",
+            source_url: d.url,
+            tags: ["cwz:2026", "event-host"],
+          },
+          { onConflict: "kind,normalized_name", ignoreDuplicates: false },
+        )
+        .select("id")
+        .single();
+      if (hostRow?.id) {
+        await sb
+          .from("cw_events")
+          .update({ host_org_id: hostRow.id })
+          .eq("id", ev.id);
+        await sb
+          .from("cw_event_attendees")
+          .upsert(
+            { event_id: ev.id, attendee_id: hostRow.id, relation: "host" },
+            { onConflict: "event_id,attendee_id,relation", ignoreDuplicates: true },
+          );
+      }
+    }
+
+    // Upsert speakers + org links
+    for (const s of d.speakers) {
+      if (!s.name) continue;
+      let orgId: string | null = null;
+      if (s.organization) {
+        const { data: orgRow } = await sb
+          .from("cw_attendees")
+          .upsert(
+            {
+              kind: "organization",
+              name: s.organization,
+              normalized_name: normalizeName(s.organization),
+              source: "event-detail",
+              source_url: d.url,
+              tags: ["cwz:2026"],
+            },
+            { onConflict: "kind,normalized_name", ignoreDuplicates: false },
+          )
+          .select("id")
+          .single();
+        orgId = orgRow?.id ?? null;
+      }
+      const { data: spkRow } = await sb
+        .from("cw_attendees")
+        .upsert(
+          {
+            kind: "individual",
+            name: s.name,
+            normalized_name: normalizeName(s.name),
+            role: s.role ?? null,
+            org_id: orgId,
+            source: "event-detail",
+            source_url: d.url,
+            tags: ["cwz:2026", "speaker"],
+          },
+          { onConflict: "kind,normalized_name", ignoreDuplicates: false },
+        )
+        .select("id")
+        .single();
+      if (spkRow?.id) {
+        await sb
+          .from("cw_event_attendees")
+          .upsert(
+            { event_id: ev.id, attendee_id: spkRow.id, relation: "speaker" },
+            { onConflict: "event_id,attendee_id,relation", ignoreDuplicates: true },
+          );
+        speakersLinked += 1;
+      }
+    }
+  }
+
+  const stats = {
+    pending: pending.length,
+    scraped: result.items.length,
+    speakers: speakersLinked,
+  };
+  await logRun("orchestrator:event-details", started, stats, result.ok, result.errors);
+  return { stats, errors: result.errors };
+}
+
+/** Full pipeline: discovery → events → enrich → news → score. */
+export async function orchestrateFull(opts: { enrichLimit?: number; newsLimit?: number; scoreLimit?: number; eventDetailLimit?: number } = {}) {
   const a = await orchestrateDiscovery();
+  const e1 = await orchestrateEventHarvest();
+  const e2 = await orchestrateEventDetails(opts.eventDetailLimit ?? 10);
   const b = await orchestrateEnrich(opts.enrichLimit ?? 20);
   const c = await orchestrateNews(opts.newsLimit ?? 25);
   const d = await orchestrateScore(opts.scoreLimit ?? 50);
-  return { discovery: a, enrich: b, news: c, score: d };
+  return { discovery: a, eventHarvest: e1, eventDetails: e2, enrich: b, news: c, score: d };
 }

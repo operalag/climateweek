@@ -25,9 +25,22 @@ function key() {
   return k;
 }
 
+export type FirecrawlAction =
+  | { type: "wait"; milliseconds: number }
+  | { type: "scroll"; direction: "up" | "down" }
+  | { type: "click"; selector: string }
+  | { type: "screenshot" }
+  | { type: "press"; key: string };
+
 export async function firecrawlScrape(
   url: string,
-  opts: { formats?: ("markdown" | "html" | "links")[]; onlyMainContent?: boolean } = {},
+  opts: {
+    formats?: ("markdown" | "html" | "links")[];
+    onlyMainContent?: boolean;
+    waitFor?: number;
+    actions?: FirecrawlAction[];
+    timeout?: number;
+  } = {},
 ): Promise<FirecrawlScrapeResult> {
   const res = await fetch(`${BASE}/scrape`, {
     method: "POST",
@@ -36,6 +49,9 @@ export async function firecrawlScrape(
       url,
       formats: opts.formats ?? ["markdown", "links"],
       onlyMainContent: opts.onlyMainContent ?? true,
+      ...(opts.waitFor !== undefined ? { waitFor: opts.waitFor } : {}),
+      ...(opts.actions ? { actions: opts.actions } : {}),
+      ...(opts.timeout !== undefined ? { timeout: opts.timeout } : {}),
     }),
   });
   if (!res.ok) {

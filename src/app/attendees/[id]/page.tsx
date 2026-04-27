@@ -9,12 +9,16 @@ export default async function AttendeePage({ params }: { params: Promise<{ id: s
   const sb = tryGetServiceSupabase();
   if (!sb) return <EmptyState title="Supabase not configured" />;
 
-  const [{ data: attendee }, { data: scores }, { data: signals }, { data: drafts }] =
+  const [{ data: attendee }, { data: scores }, { data: signals }, { data: drafts }, { data: events }] =
     await Promise.all([
       sb.from("cw_attendees").select("*").eq("id", id).single(),
       sb.from("cw_scores").select("*").eq("attendee_id", id).order("created_at", { ascending: false }).limit(5),
       sb.from("cw_signals").select("*").eq("attendee_id", id).order("seen_at", { ascending: false }).limit(15),
       sb.from("cw_outreach_drafts").select("*").eq("attendee_id", id).order("created_at", { ascending: false }).limit(10),
+      sb
+        .from("cw_event_attendees")
+        .select("relation, cw_events(id,title,date,start_time,location,theme,track)")
+        .eq("attendee_id", id),
     ]);
 
   if (!attendee) return notFound();
@@ -59,6 +63,31 @@ export default async function AttendeePage({ params }: { params: Promise<{ id: s
         <section className="panel p-4">
           <div className="text-xs uppercase tracking-wide mb-2" style={{ color: "var(--text-dim)" }}>About</div>
           <p className="text-sm whitespace-pre-wrap">{attendee.bio}</p>
+        </section>
+      ) : null}
+
+      {events?.length ? (
+        <section>
+          <h2 className="text-lg font-medium mb-2">
+            CWZ events <span style={{ color: "var(--text-dim)" }}>({events.length})</span>
+          </h2>
+          <ul className="space-y-2">
+            {events.map((e: any, i: number) =>
+              e.cw_events ? (
+                <li key={`${e.cw_events.id}-${i}`} className="panel p-3 text-sm flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <a href={`/events/${e.cw_events.id}`} className="font-medium hover:underline">
+                      {e.cw_events.title}
+                    </a>
+                    <div className="mt-1 text-xs" style={{ color: "var(--text-dim)" }}>
+                      {[e.cw_events.date, e.cw_events.start_time, e.cw_events.location].filter(Boolean).join(" · ")}
+                    </div>
+                  </div>
+                  <span className="chip">{e.relation}</span>
+                </li>
+              ) : null,
+            )}
+          </ul>
         </section>
       ) : null}
 
